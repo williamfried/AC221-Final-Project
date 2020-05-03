@@ -1,0 +1,138 @@
+---
+title: "ac221"
+author: "Will Fried"
+date: "4/27/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T)
+```
+
+```{r}
+# library that implements beta regression 
+library(betareg)
+```
+
+```{r}
+# observations in original dataset with grade values that aren't 0 or null
+train_df = read.csv('train_df.csv')
+```
+
+```{r}
+# synthetic observations that are not predicted to have grade of 0 according to logistic regression
+test_df = read.csv('test_df.csv')
+```
+
+```{r}
+# remove erroneous LoE values of `learn` and `Learn`
+test_df$LoE = sapply(as.vector(test_df$LoE), function(x) ifelse(x %in% c('learn', 'Learn'), 'None', x))
+```
+
+
+```{r}
+# train beta regression model on subset of training set to speed up training process
+train_df_sample = train_df[sample(nrow(train_df), round(nrow(train_df) / 10)), ]
+```
+
+```{r, eval=F}
+# beta regression encounters errors and doesn't work
+beta_model = betareg(grade ~ ., data=train_df_sample, link='logit', link.phi='identity', control=betareg.control(trace=T, maxit=100))
+```
+
+As shown above, the beta regression model breaks down when just a quarter of the training data is used to fit the model. Therefore, an alternative model is needed. To allow 
+
+```{r}
+# apply probit transformation to grade values
+train_df$probit_grade = qnorm(train_df$grade)
+```
+
+```{r}
+# shift grade values up such that all are positive 
+offset = -min(train_df$probit_grade) + 0.01
+train_df$shifted_grade = train_df$probit_grade + offset
+```
+
+
+```{r}
+# kernel density estimate of transformed and shifted grade values
+plot(density(train_df$shifted_grade))
+```
+
+
+```{r}
+# fit gamma regression with log link
+gamma_reg = glm(shifted_grade ~ course_id + LoE + gender + nforum_posts + YoB_missing + YoB_centered + from_USA, data=train_df, family=Gamma(log), control=glm.control(maxit=15, trace=T))
+```
+
+
+```{r}
+# check for linear relationship between nforum_posts and response variable on link scale
+train_preds = predict(gamma_reg, type='link')
+plot(train_df$nforum_posts, train_preds, xlab='nforum_posts', ylab='log of predicted response')
+```
+
+
+
+```{r}
+# extract coefficients from gamma regression
+summary(gamma_reg)
+```
+
+
+
+```{r}
+# handle course_ids that are present in the test set but not in the training set by filling in different course_id
+missing_course_ids = c('HarvardX/AI12.1x/2013_SOND', 'HarvardX/CS50/AP', 'HarvardX/CS50B/Business', 'HarvardX/CS50T/Technology', 'HarvardX/HAA1x/1T2014', 'HarvardX/HLS1.1x/1T2014', 'HarvardX/HLS1x/2013_Spring', 'HarvardX/HLS1xA/Copyright', 'HarvardX/HLS1xB/Copyright', 'HarvardX/HLS1xC/Copyright', 'HarvardX/HLS1xD/Copyright', 'HarvardX/MCB80.1x/2013_SOND', 'HarvardX/MCB80.1x/2T2016', 'HarvardX/MCB80.2x/2T2016', 'HarvardX/MCB80.2x/3T2014', 'HarvardX/MCB80.3x/2T2016', 'HarvardX/MCB80.3x/3T2015', 'HarvardX/MUS24.4x/2T2018', 'HarvardX/PH211x/1T2018', 'HarvardX/PH525.5x/2T2018', 'HarvardX/PH525.6x/2T2018', 'HarvardX/PH525.7x/2T2018', 'HarvardX/CS50/X')
+
+test_df$course_id = sapply(as.vector(test_df$course_id), function(x) ifelse(x %in% missing_course_ids, 'HarvardX/HKS101A/2015T3', x))
+```
+
+
+```{r}
+# predict grade values on link scale for test set observations
+preds = predict(gamma_reg, newdata=test_df, type='link')
+```
+
+```{r}
+# calculate parameters of gamma distribution for each observations
+phi = 0.5695503
+nu = 1 / phi
+preds_vec = as.vector(preds)
+mu = exp(preds_vec)
+lambda = nu / mu
+```
+
+```{r}
+# ample from corresponding gamma distribution
+grade_preds = rgamma(length(lambda), nu, lambda)
+```
+
+```{r}
+# plot of grade samples
+grade_preds_no_extremes = grade_preds[grade_preds < quantile(grade_preds, 0.99)]
+plot(density(grade_preds_no_extremes))
+```
+
+```{r}
+# transform grade predictions back to original scale between 0 and 1
+grade_preds_shifted = grade_preds - offset
+grade_pred_original_scale = pnorm(grade_preds_shifted)
+```
+
+```{r}
+plot(density(grade_pred_original_scale), xlab='grade', main='Distribution of predicted grades')
+```
+
+```{r}
+plot(density(train_df$grade), xlab='grade', main='Distribution of nonzero grade in original dataset')
+```
+
+```{r}
+# save predictions to CSV file to read back into Python 
+preds_df = data.frame('preds'=round(grade_pred_original_scale, 2))
+write.csv(preds_df, 'preds.csv')
+```
+
+
+
